@@ -9,23 +9,17 @@
 #import "ABFRealmSearchViewController.h"
 
 #import <Realm/Realm.h>
-#import <RBQFetchedResultsController/RBQFetchedResultsController.h>
-#import <RBQFetchedResultsController/RBQFetchRequest.h>
+#import <Realm/RLMRealm_Dynamic.h>
 
-typedef void(^ABFBlock)();
 
 @interface ABFRealmSearchViewController () <UISearchResultsUpdating, UITableViewDataSource, UITableViewDelegate>
-
-@property (strong, nonatomic) RBQFetchedResultsController *fetchResultsController;
-
 @property (strong, nonatomic) UISearchController *searchController;
-
-@property (strong, nonatomic) NSOperationQueue *searchQueue;
-
 @property (strong, nonatomic) RLMRealmConfiguration *realmConfiguration;
-
 @property (assign, nonatomic) BOOL viewLoaded;
 
+@property (strong, nonatomic) RLMResults *results;
+@property (strong, nonatomic) RLMNotificationToken *resultsToken;
+@property (strong, nonatomic) NSString *searchText;
 @end
 
 @implementation ABFRealmSearchViewController
@@ -47,8 +41,7 @@ typedef void(^ABFBlock)();
     self.definesPresentationContext = YES;
     
     self.viewLoaded = YES;
-    
-    [self updateFetchedResultsController:self.basePredicate];
+    [self updateSearch];
 }
 
 #pragma mark - ABFRealmSearchViewController Initializiation
@@ -187,41 +180,20 @@ typedef void(^ABFBlock)();
     
     _realmConfiguration = [RLMRealmConfiguration defaultConfiguration];
     
-    // Create the FRC
-    _fetchResultsController = [[RBQFetchedResultsController alloc] init];
-    
     // Create the search controller
     _searchController = [[UISearchController alloc] initWithSearchResultsController:nil];
     _searchController.searchResultsUpdater = self;
     _searchController.dimsBackgroundDuringPresentation = NO;
     
     _searchBar = _searchController.searchBar;
-    
-    // Search queue
-    _searchQueue = [[NSOperationQueue alloc] init];
-    _searchQueue.maxConcurrentOperationCount = 1;
 }
 
 #pragma mark - <UISearchResultsUpdating>
 
 - (void)updateSearchResultsForSearchController:(UISearchController *)searchController
 {
-    NSString *searchString = searchController.searchBar.text;
-    
-    NSPredicate *predicate = [self searchPredicateWithText:searchString];
-    
-    typeof(self) __weak weakSelf = self;
-    
-    NSBlockOperation *searchOperation = [NSBlockOperation blockOperationWithBlock:^() {
-        
-        [weakSelf updateFetchedResultsController:predicate];
-    }];
-    
-    // Remove any pending searches
-    [self.searchQueue cancelAllOperations];
-    
-    // Perform the most recent search
-    [self.searchQueue addOperation:searchOperation];
+    self.searchText = searchController.searchBar.text;
+    [self updateSearch];
 }
 
 #pragma mark - <UITableViewDelegate>
@@ -230,7 +202,7 @@ typedef void(^ABFBlock)();
 {
     if ([self.resultsDelegate respondsToSelector:@selector(searchViewController:willSelectObject:atIndexPath:)]) {
         
-        id object = [self.fetchResultsController objectAtIndexPath:indexPath];
+        id object = self.results[indexPath.row];
         
         [self.resultsDelegate searchViewController:self willSelectObject:object atIndexPath:indexPath];
     }
@@ -242,7 +214,7 @@ typedef void(^ABFBlock)();
 {
     if ([self.resultsDelegate respondsToSelector:@selector(searchViewController:didSelectObject:atIndexPath:)]) {
         
-        id object = [self.fetchResultsController objectAtIndexPath:indexPath];
+        id object = self.results[indexPath.row];
         
         [self.resultsDelegate searchViewController:self didSelectObject:object atIndexPath:indexPath];
     }
@@ -253,19 +225,19 @@ typedef void(^ABFBlock)();
 - (NSInteger)numberOfSectionsInTableView:(UITableView *)tableView
 {
     // Return the number of sections.
-    return [self.fetchResultsController numberOfSections];
+    return 1;
 }
 
 - (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section
 {
     // Return the number of rows in the section.
     
-    return [self.fetchResultsController numberOfRowsForSectionIndex:section];
+    return self.results.count;
 }
 
 - (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath
 {
-    id object = [self.fetchResultsController objectAtIndexPath:indexPath];
+    id object = self.results[indexPath.row];
     
     UITableViewCell *cell = [self.resultsDataSource searchViewController:self
                                                            cellForObject:object
@@ -306,144 +278,92 @@ typedef void(^ABFBlock)();
 - (void)setEntityName:(NSString *)entityName
 {
     _entityName = entityName;
-    
-    [self updateFetchedResultsController:self.basePredicate];
+    [self updateSearch];
 }
-
 
 - (void)setSearchPropertyKeyPath:(NSString *)searchPropertyKeyPath
 {
     _searchPropertyKeyPath = searchPropertyKeyPath;
-    
-    [self updateFetchedResultsController:self.basePredicate];
+    [self updateSearch];
 }
 
 - (void)setBasePredicate:(NSPredicate *)basePredicate
 {
     _basePredicate = basePredicate;
-    
-    [self updateFetchedResultsController:self.basePredicate];
+    [self updateSearch];
 }
 
 - (void)setSortPropertyKey:(NSString *)sortPropertyKey
 {
     _sortPropertyKey = sortPropertyKey;
-    
-    [self updateFetchedResultsController:self.basePredicate];
+    [self updateSearch];
 }
 
 - (void)setSortAscending:(BOOL)sortAscending
 {
     _sortAscending = sortAscending;
-    
-    [self updateFetchedResultsController:self.basePredicate];
+    [self updateSearch];
 }
 
 - (void)setCaseInsensitiveSearch:(BOOL)caseInsensitiveSearch
 {
     _caseInsensitiveSearch = caseInsensitiveSearch;
-    
-    [self updateFetchedResultsController:self.basePredicate];
+    [self updateSearch];
 }
 
 - (void)setUseContainsSearch:(BOOL)useContainsSearch
 {
     _useContainsSearch = useContainsSearch;
-    
-    [self updateFetchedResultsController:self.basePredicate];
+    [self updateSearch];
 }
 
 #pragma mark - Private
 
-- (void)updateFetchedResultsController:(NSPredicate *)predicate
+- (void)updateWithNewResults:(RLMResults *)results
 {
-    @synchronized(self) {
-        RBQFetchRequest *fetchRequest = [self searchFetchRequestWithEntityName:self.entityName
-                                                                       inRealm:self.realm
-                                                                     predicate:predicate
-                                                               sortPropertyKey:self.sortPropertyKey
-                                                                 sortAscending:self.sortAscending];
-        
-        if (fetchRequest) {
-            [self.fetchResultsController updateFetchRequest:fetchRequest
-                                         sectionNameKeyPath:nil
-                                             andPeformFetch:self.viewLoaded];
-            
-            if (self.viewLoaded) {
-                
-                typeof(self) __weak weakSelf = self;
-                [self runOnMainThread:^{
-                    [weakSelf.tableView reloadData];
-                }];
-            }
-        }
+    self.results = results;
+    [self.tableView reloadData];
+}
+
+- (void)updateSearch
+{
+    RLMResults *search = [self.realm allObjects:self.entityName];
+    if (self.basePredicate) {
+        search = [search objectsWithPredicate:self.basePredicate];
+    }
+    if (self.searchText.length) {
+        search = [search objectsWithPredicate:[self searchPredicateWithText:self.searchText]];
+    }
+    if (self.sortPropertyKey) {
+        search = [search sortedResultsUsingProperty:self.sortPropertyKey ascending:self.sortAscending];
+    }
+
+    [self.resultsToken stop];
+
+    if (self.viewLoaded) {
+        __weak typeof(self) weakSelf = self;
+        self.resultsToken = [search deliverOnMainThread:^(RLMResults *results, NSError *error) {
+            [weakSelf updateWithNewResults:results];
+        }];
     }
 }
 
 - (NSPredicate *)searchPredicateWithText:(NSString *)text
 {
-    if (![text isEqualToString:@""]) {
-        
-        NSExpression *leftExpression = [NSExpression expressionForKeyPath:self.searchPropertyKeyPath];
-        
-        NSExpression *rightExpression = [NSExpression expressionForConstantValue:text];
-        
-        NSPredicateOperatorType operatorType = self.useContainsSearch ? NSContainsPredicateOperatorType : NSBeginsWithPredicateOperatorType;
-        
-        NSComparisonPredicateOptions options = self.caseInsensitiveSearch ? NSCaseInsensitivePredicateOption : 0;
-        
-        NSComparisonPredicate *filterPredicate = [NSComparisonPredicate predicateWithLeftExpression:leftExpression
-                                                                                    rightExpression:rightExpression
-                                                                                           modifier:NSDirectPredicateModifier
-                                                                                               type:operatorType options:options];
-        
-        if (self.basePredicate) {
-            NSCompoundPredicate *compoundPredicate = [NSCompoundPredicate andPredicateWithSubpredicates:@[self.basePredicate,filterPredicate]];
-            
-            return compoundPredicate;
-        }
-        
-        return filterPredicate;
-    }
-    
-    return self.basePredicate;
-}
+    NSExpression *leftExpression = [NSExpression expressionForKeyPath:self.searchPropertyKeyPath];
 
-- (RBQFetchRequest *)searchFetchRequestWithEntityName:(NSString *)entityName
-                                              inRealm:(RLMRealm *)realm
-                                            predicate:(NSPredicate *)predicate
-                                      sortPropertyKey:(NSString *)sortPropertyKey
-                                        sortAscending:(BOOL)sortAscending
-{
-    if (entityName && realm) {
-        RBQFetchRequest *fetchRequest = [RBQFetchRequest fetchRequestWithEntityName:entityName
-                                                                            inRealm:realm
-                                                                          predicate:predicate];
-        
-        if (self.sortPropertyKey) {
-            
-            RLMSortDescriptor *sort = [RLMSortDescriptor sortDescriptorWithProperty:sortPropertyKey
-                                                                          ascending:sortAscending];
-            
-            fetchRequest.sortDescriptors = @[sort];
-        }
-        
-        return fetchRequest;
-    }
-    
-    return nil;
-}
+    NSExpression *rightExpression = [NSExpression expressionForConstantValue:text];
 
-- (void)runOnMainThread:(ABFBlock)block
-{
-    if ([NSThread isMainThread]) {
-        block();
-    }
-    else {
-        dispatch_async(dispatch_get_main_queue(), ^{
-            block();
-        });
-    }
+    NSPredicateOperatorType operatorType = self.useContainsSearch ? NSContainsPredicateOperatorType : NSBeginsWithPredicateOperatorType;
+
+    NSComparisonPredicateOptions options = self.caseInsensitiveSearch ? NSCaseInsensitivePredicateOption : 0;
+
+    NSComparisonPredicate *filterPredicate = [NSComparisonPredicate predicateWithLeftExpression:leftExpression
+                                                                                rightExpression:rightExpression
+                                                                                       modifier:NSDirectPredicateModifier
+                                                                                           type:operatorType options:options];
+
+    return filterPredicate;
 }
 
 @end

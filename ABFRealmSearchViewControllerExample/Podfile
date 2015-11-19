@@ -1,11 +1,10 @@
 target 'ABFRealmSearchViewControllerExample' do
-  pod 'Realm'
-  pod 'RBQFetchedResultsController'
+  pod 'Realm', :git => 'https://github.com/realm/realm-cocoa', :branch => 'tg-async-query'
   pod 'RealmSFRestaurantData'
   pod 'TOWebViewController'
 end
 
 target 'ABFRealmSearchViewControllerExampleTests' do
-  pod 'Realm/Headers'
+  pod 'Realm/Headers', :git => 'https://github.com/realm/realm-cocoa', :branch => 'tg-async-query'
 end
 
